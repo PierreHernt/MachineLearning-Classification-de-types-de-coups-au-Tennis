@@ -1,0 +1,697 @@
+---
+title: "DEFORGES-VATTIER-HERNOT"
+format: html
+editor: visual
+code:
+  knitr:
+    external: true
+---
+
+# Projet Apprentissage statistique
+
+## Descriptif et préparation des données
+
+Notre jeu de données contient des mesures d'accélération et de gyroscope enregistrées pour différents types de coups au tennis, avec un accéléromètre positionné sur le manche de la raquette. L'objectif est de pouvoir labelliser automatiquement le coup réalisé en fonction des variables d'accélération et de gyroscope.
+
+![Image 1 : Disposition de l''accéléromètre sur la raquette](image/raquette1.png)
+
+Nous sommes partis d'un dataframe où 100 frames correspondaient à un coup. Afin de le traiter avec nos algorithmes, qui ne tiennent pas compte des séquences, nous avons caractérisé chaque coup en utilisant différentes valeurs moyennées. Ces valeurs moyennées seront calculées pour l'Accélération et le Gyroscope, pour nos 3 axes : X,Y et Z.
+
+**Mean :** Valeur moyenne d'accélération/gyroscope
+
+**Min :** valeur minimale
+
+**Max :** valeur maximale
+
+**SD :** écart-type de l'accélération/gyroscope
+
+**Kurtosis :** applatissement de la courbe d'accélération/gyroscope
+
+**Skew :** asymétrie de la courbe d'accélération/gyroscope
+
+L'objectif de ce travail est de prédire, à partir de ces variables, le type de coup représenté par la variable :
+
+**TypeOfShot :**
+
+-   0 = Service
+
+-   1 = Coup droit fond de court
+
+-   2 = Revers fond de court
+
+-   3 = Coup droit de vollée
+
+-   4 = Revers de vollée
+
+### Librairies et import des données
+
+```{r}
+library(readr)
+library(dplyr)
+library(tidymodels)
+library(ggplot2)
+library(yardstick)
+library(caret)
+library(xgboost)
+data <- read.csv("training_dataset_normalise") #Choisir données normalisées ou non
+summary(data)
+head(data,2)
+```
+
+### Split des données
+
+```{r}
+data <- na.omit(data)
+data <- data[,][-1]
+data <- data |> mutate(TypeOfShot=as.factor(TypeOfShot))
+data_split <- initial_split(data, prop = 0.7) 
+data_train <- training(data_split) 
+data_test <- testing(data_split)
+```
+
+# Application de nos modèles
+
+## Régression logistique multinomiale
+
+La régression logistique multinomiale est une extension de la régression logistique binaire, permettant de modéliser des situations où la variable dépendante a plus de deux catégories. La méthode de régression logistique multinomiale vise à prédire la probabilité d'appartenance à chaque classe pour une observation donnée.
+
+```{r}
+multi_model <- multinom_reg() |>
+  set_engine("nnet") |>
+  set_mode("classification")
+
+data_recipe <- recipe(TypeOfShot ~ ., data = data_train)
+
+multinom_fit <- workflow() %>%
+  add_recipe(data_recipe) %>%
+  add_model(multi_model) %>%
+  fit(data = data_train)
+
+# Prédictions sur l'ensemble de données de test
+log_class <- predict(multinom_fit, new_data = data_test,type='class')
+log_prob <- predict(multinom_fit,new_data=data_test,type="prob")
+
+# Ajouter les prédictions aux données de test pour faciliter l'évaluation
+test_data_fit <- data_test %>%
+  bind_cols(log_class,log_prob) |> rename(log_class=.pred_class,log_prob0=.pred_0,log_prob1=.pred_1,log_prob2 = .pred_2,log_prob3 = .pred_3,log_prob4=.pred_4)
+
+
+# Calculer d'autres métriques de performance si nécessaire, par exemple l'accuracy
+test_accuracy_log <- test_data_fit %>%
+  accuracy(truth = TypeOfShot, estimate = log_class)
+
+print(test_accuracy_log)
+```
+
+```{r}
+
+# Calculer la matrice de confusion pour évaluer la performance
+conf_mat <- test_data_fit %>%
+  conf_mat(truth = TypeOfShot, estimate = log_class)
+
+
+# Utiliser autoplot pour créer la heatmap
+heatmap_plot <- autoplot(conf_mat, type = "heatmap")
+heatmap_plot +
+  scale_fill_gradient(low = "white", high = "lightgreen")
+
+
+# Calculer la précision pour chaque classe
+matrice_confusion <- conf_mat[[1]]
+precision_par_classeslog <- diag(matrice_confusion) / colSums(matrice_confusion)
+```
+
+## Régression logistique multinomiale (LASSO)
+
+La régression logistique multinomiale avec LASSO est une méthode qui utilise la régularisation L1 pour favoriser la parcimonie des coefficients dans le modèle. La régularisation L1 ajoute une pénalité proportionnelle à la somme des valeurs absolues des coefficients du modèle. Cela a pour effet de pousser certains coefficients vers zéro, ce qui peut conduire à la sélection automatique de variables, réduisant ainsi la complexité du modèle.
+
+```{r}
+multi_lasso_model <- multinom_reg(penalty = tune(),mixture = 1) |> set_engine("glmnet") |> set_mode('classification') 
+
+multi_lasso_wf <- workflow() |>
+  add_model(multi_lasso_model) |> 
+  add_formula(TypeOfShot ~ .)
+
+multi_lasso_fit <- multi_lasso_wf |>
+  fit(data=data_train)
+
+cv_splits <- vfold_cv(data_train, v = 10,repeats=1, strata = TypeOfShot)
+grid_vals <- grid_regular(penalty(), levels = 50)
+
+multi_lasso_results <- tune_grid(
+  multi_lasso_wf,
+  resamples = cv_splits,
+  grid = grid_vals,
+  metrics = metric_set(accuracy))
+
+lasso_cv_metrics <- multi_lasso_results |>
+collect_metrics()
+
+lasso_cv_metrics |>
+ggplot(aes(penalty, mean, color = .metric)) +
+geom_errorbar(aes(ymin = mean - std_err,ymax = mean + std_err),
+alpha = 0.5) +
+geom_line(linewidth = 0.5) +
+facet_wrap(~.metric, scales = "free", nrow = 2) +
+theme(legend.position = "none")
+
+
+# Identification du meilleur paramètre de pénalité
+best_penalty <- select_best(multi_lasso_results, "accuracy") 
+
+final_model <- finalize_workflow(multi_lasso_wf, best_penalty)
+print(final_model)
+final_fit <- fit(final_model, data = data_train)
+
+final_fit |> tidy()
+
+# Prédictions sur l'ensemble de données de test
+lasso_class <- predict(final_fit, new_data = data_test,type='class')|> rename(lasso_class=.pred_class)
+lasso_prob <- predict(final_fit,new_data=data_test,type="prob") |> rename(lasso_prob0=.pred_0,lasso_prob1=.pred_1,lasso_prob2 = .pred_2,lasso_prob3 = .pred_3,lasso_prob4=.pred_4)
+
+# Ajouter les prédictions aux données de test pour faciliter l'évaluation
+test_data_fit <- test_data_fit %>%
+  bind_cols(lasso_class,lasso_prob)
+
+# Calculer d'autres métriques de performance si nécessaire, par exemple l'accuracy
+test_accuracy_lasso <- test_data_fit %>%
+  accuracy(truth = TypeOfShot, estimate = lasso_class)
+
+print(test_accuracy_lasso)
+```
+
+```{r}
+
+# Calculer la matrice de confusion pour évaluer la performance
+conf_mat <- test_data_fit %>%
+  conf_mat(truth = TypeOfShot, estimate = lasso_class)
+
+# Utiliser autoplot pour créer la heatmap
+heatmap_plot <- autoplot(conf_mat, type = "heatmap")
+heatmap_plot +
+  scale_fill_gradient(low = "white", high = "lightgreen")
+
+# Calculer la précision pour chaque classe
+matrice_confusion <- conf_mat[[1]]
+precision_par_classeslasso <- diag(matrice_confusion) / colSums(matrice_confusion)
+```
+
+## Régression logistique multinomiale (Ridge)
+
+La régression logistique multinomiale avec Ridge utilise la régularisation L2 pour contrôler la taille des coefficients du modèle. La régularisation L2 ajoute une pénalité proportionnelle à la somme des carrés des coefficients. Contrairement à ridge, la régularisation L2 n'entraîne généralement pas la sélection automatique de variables en forçant les coefficients à atteindre zéro. Au lieu de cela, elle réduit l'amplitude des coefficients, ce qui peut être utile pour atténuer les effets de la colinéarité entre les variables.
+
+```{r}
+multi_ridge_model <- multinom_reg(penalty = tune(),mixture = 0) |> set_engine("glmnet") |> set_mode('classification') 
+
+multi_ridge_wf <- workflow() |>
+  add_model(multi_ridge_model) |> 
+  add_formula(TypeOfShot ~ .)
+
+multi_ridge_fit <- multi_ridge_wf |>
+  fit(data=data_train)
+
+
+cv_splits <- vfold_cv(data_train, v = 10, repeats = 1, strata = TypeOfShot)
+grid_vals <- grid_regular(penalty(), levels = 50)
+
+multi_ridge_results <- tune_grid(
+  multi_ridge_wf,
+  resamples = cv_splits,
+  grid = grid_vals,
+  metrics = metric_set(accuracy))
+
+ridge_cv_metrics <- multi_ridge_results |>
+collect_metrics()
+
+ridge_cv_metrics |>
+ggplot(aes(penalty, mean, color = .metric)) +
+geom_errorbar(aes(ymin = mean - std_err,ymax = mean + std_err),
+alpha = 0.5) +
+geom_line(linewidth = 0.5) +
+facet_wrap(~.metric, scales = "free", nrow = 2) +
+theme(legend.position = "none")
+
+
+# Identification du meilleur paramètre de pénalité
+best_penalty <- select_best(multi_ridge_results, "accuracy") 
+
+final_model <- finalize_workflow(multi_ridge_wf, best_penalty)
+print(final_model)
+final_fit <- fit(final_model, data = data_train)
+
+final_fit |> tidy()
+
+# Prédictions sur l'ensemble de données de test
+ridge_class <- predict(final_fit, new_data = data_test,type='class')|> rename(ridge_class=.pred_class)
+ridge_prob <- predict(final_fit,new_data=data_test,type="prob") |> rename(ridge_prob0=.pred_0,ridge_prob1=.pred_1,ridge_prob2 = .pred_2,ridge_prob3 = .pred_3,ridge_prob4=.pred_4)
+
+# Ajouter les prédictions aux données de test pour faciliter l'évaluation
+test_data_fit <- test_data_fit |> bind_cols(ridge_class,ridge_prob)
+
+
+# Calculer d'autres métriques de performance si nécessaire, par exemple l'accuracy
+test_accuracy_ridge <- test_data_fit |> accuracy(truth = TypeOfShot, estimate = ridge_class)
+
+print(test_accuracy_ridge)
+```
+
+```{r}
+
+# Calculer la matrice de confusion pour évaluer la performance
+conf_mat <- test_data_fit %>%
+  conf_mat(truth = TypeOfShot, estimate = ridge_class)
+
+# Utiliser autoplot pour créer la heatmap
+heatmap_plot <- autoplot(conf_mat, type = "heatmap")
+heatmap_plot +
+  scale_fill_gradient(low = "white", high = "lightgreen")
+
+# Calculer la précision pour chaque classe
+matrice_confusion <- conf_mat[[1]]
+precision_par_classesridge <- diag(matrice_confusion) / colSums(matrice_confusion)
+```
+
+## Régression logistique multinomiale (ELASTIC-NET)
+
+En régression logistique multinomiale, l'Elastic Net ajoute deux termes à la fonction de coût classique. Le paramètre d'élasticité (souvent noté comme **`alpha`**) contrôle le mélange relatif de L1 et L2. Un **`alpha`** de 1 donne une régularisation Lasso pure, un **`alpha`** de 0 donne une régularisation Ridge pure, et une valeur entre 0 et 1 donne une combinaison d'Elastic Net.
+
+En résumé, l'Elastic Net dans une régression logistique multinomiale est une technique de régularisation qui cherche à optimiser la performance du modèle tout en favorisant la parsimonie des coefficients et en traitant la colinéarité entre les variables. Le choix de **`alpha`** et d'autres paramètres est souvent guidé par la validation croisée pour trouver la meilleure configuration du modèle.
+
+```{r}
+multi_net_model <- multinom_reg(penalty = tune(),mixture = tune()) |> set_engine("glmnet") |> set_mode('classification') 
+
+
+multi_net_wf <- workflow() |>
+  add_model(multi_net_model) |> 
+  add_formula(TypeOfShot ~ .)
+
+multi_net_fit <- multi_net_wf |>
+  fit(data=data_train)
+
+
+cv_splits <- vfold_cv(data_train, v = 10,repeats = 1, strata = TypeOfShot)
+# Spécifier la grille de valeurs pour alpha (mixture) et lambda(penalty)
+grid_vals <- expand.grid(penalty = seq(0, 2, length =50), mixture = seq(0, 1,length = 10))
+
+multi_net_results <- tune_grid(
+  multi_net_wf,
+  resamples = cv_splits,
+  grid = grid_vals,
+  metrics = metric_set(accuracy))
+
+net_cv_metrics <- multi_net_results |>
+collect_metrics()
+
+net_cv_metrics |>
+ggplot(aes(penalty, mean, color = .metric)) +
+geom_errorbar(aes(ymin = mean - std_err,ymax = mean + std_err),
+alpha = 0.5) +
+geom_line(linewidth = 0.5) +
+facet_wrap(~.metric, scales = "free", nrow = 2) +
+theme(legend.position = "none")
+
+
+# Identification des meilleurs paramètres lambda & alpha
+best_penalty <- select_best(multi_net_results, "accuracy") 
+
+final_model <- finalize_workflow(multi_net_wf, best_penalty)
+print(final_model)
+final_fit <- fit(final_model, data = data_train)
+
+final_fit |> tidy()
+
+# Prédictions sur l'ensemble de données de test
+net_class <- predict(final_fit, new_data = data_test,type='class')|> rename(net_class=.pred_class)
+net_prob <- predict(final_fit,new_data=data_test,type="prob") |> rename(net_prob0=.pred_0,net_prob1=.pred_1,net_prob2 = .pred_2,net_prob3 = .pred_3,net_prob4=.pred_4)
+
+# Ajouter les prédictions aux données de test pour faciliter l'évaluation
+test_data_fit <- test_data_fit |> bind_cols(net_class,net_prob)
+
+
+# Calculer d'autres métriques de performance si nécessaire, par exemple l'accuracy
+test_accuracy_net <- test_data_fit %>%
+  accuracy(truth = TypeOfShot, estimate = net_class)
+
+print(test_accuracy_net)
+```
+
+```{r}
+# Calculer la matrice de confusion pour évaluer la performance
+conf_mat <- test_data_fit %>%
+  conf_mat(truth = TypeOfShot, estimate = net_class)
+
+# Utiliser autoplot pour créer la heatmap
+heatmap_plot <- autoplot(conf_mat, type = "heatmap")
+heatmap_plot +
+  scale_fill_gradient(low = "white", high = "lightgreen")
+
+# Calculer la précision pour chaque classe
+matrice_confusion <- conf_mat[[1]]
+precision_par_classesnet <- diag(matrice_confusion) / colSums(matrice_confusion)
+```
+
+## Random-Forest avec Ranger
+
+Random Forest est un algorithme d'apprentissage automatique qui utilise plusieurs arbres de décision pour améliorer les prédictions. Il est efficace et résistant au surapprentissage.
+
+```{r}
+################### Random Forest avec ranger ####################
+
+#Création du recipe
+play_recipe= recipe(TypeOfShot~.,data = data_train)
+
+
+# Grille contenant toutes les combinaisons voulues d'hyperparamètres : variations de mtry de 1 à m variables et trees (nombres d'arbres) allant de 50 à 950
+par_grid = expand.grid(
+  mtry = seq(1, 37, by = 4),
+  trees = c(50,500,1000))
+
+# Paramétrisation du modèle Random Forest
+rf_model = rand_forest(mtry = tune(), trees = tune()) |> 
+  set_mode("classification") |>
+  set_engine("ranger")
+
+# Workflow
+rf_wf = workflow() |> add_recipe(play_recipe) |> add_model(rf_model)
+
+
+
+# On teste l'accuracy pour toutes les combinaisons d'hyperparamètres avec une validation croisée 10-fold
+
+play_samples_cv = vfold_cv(data_train, v=10,repeats=1,strata=TypeOfShot)
+
+
+rf_10_fold = rf_wf |> tune_grid(
+  resamples = play_samples_cv,
+  grid = par_grid,
+  metrics = metric_set(accuracy),
+  control = control_grid(verbose = TRUE)
+)
+
+# On sélectionne la meilleure combinaison de mtry et trees avec select_best() : meilleure accuracy obtenue avec la validation croisée
+best_combination = rf_10_fold |> select_best("accuracy")
+
+# Affichages des métriques
+rf_10_fold_metrics = rf_10_fold |> collect_metrics()
+
+# Création d'un plot avec la courbe d'apprentissage pour chaque combinaison
+learning_plot = rf_10_fold |> autoplot()
+
+# On finalise le modèle avec la meilleure combinaison
+final_rf = rf_wf |> finalize_workflow(best_combination) |> fit(data = data_train)
+
+# On prédit sur les données de test avec le modèle final
+pred = final_rf |> predict(new_data = data_test)
+
+
+# Affichage du graphique d'apprentissage
+learning_plot= learning_plot + ggtitle("Evolution de l'accuracy avec les différentes combinaisons des hyperparamètres")
+print(learning_plot)
+
+
+# Prédictions sur l'ensemble de données de test
+rf_class <- predict(final_rf, new_data = data_test,type='class')|> rename(rf_class=.pred_class)
+rf_prob <- predict(final_rf,new_data=data_test,type="prob") |> rename(rf_prob0=.pred_0,rf_prob1=.pred_1,rf_prob2 = .pred_2,rf_prob3 = .pred_3,rf_prob4=.pred_4)
+
+
+# Ajouter les prédictions aux données de test pour faciliter l'évaluation
+test_data_fit <- test_data_fit |> bind_cols(rf_class,rf_prob)
+
+# Calcul manuel du risque estimée et de l'accuracy
+risque.est = mean(data_test$TypeOfShot!=pred$.pred_class)
+test_accuracy_rf= data.frame(mean(data_test$TypeOfShot==pred$.pred_class))
+
+print(test_accuracy_rf)
+print(risque.est)
+
+```
+
+```{r}
+conf_mat <- test_data_fit %>%
+  conf_mat(truth = TypeOfShot, estimate = rf_class)
+# Utiliser autoplot pour créer la heatmap
+heatmap_plot <- autoplot(conf_mat, type = "heatmap")
+heatmap_plot +
+  scale_fill_gradient(low = "white", high = "lightgreen")
+
+# Calculer la précision pour chaque classe
+matrice_confusion <- conf_mat[[1]]
+precision_par_classesrf <- diag(matrice_confusion) / colSums(matrice_confusion)
+```
+
+## XGboost avec tidymodels
+
+XGBoost est un algorithme d'apprentissage supervisé basé sur des arbres de décision renforcés, qui combine des modèles faibles de manière séquentielle pour améliorer la précision des prédictions.
+
+```{r}
+xgb_model <- boost_tree(
+trees = 500,stop_iter=20,min_n = 1,tree_depth = tune(),learn_rate = tune()) |>
+set_mode("classification") |> set_engine("xgboost")
+
+
+#Workflow
+xgb_wf <- workflow() |> add_recipe(play_recipe) |> add_model(xgb_model)
+
+
+#Grille de combinaisons d'hyperparamètres
+xgb_grid <- expand.grid(tree_depth=c(2,3,4,5,6,7),learn_rate=c(0.025,0.05,0.1,0.2))
+
+#Validation croisée
+xgb_cv <- xgb_wf |> tune_grid(resamples=play_samples_cv,grid=xgb_grid,metrics=metric_set(accuracy))
+
+#Plot d'apprentissage
+xgb_cv |> autoplot()
+
+
+#Sélection de la meilleure partition
+best_par <- xgb_cv |> select_best()
+
+#Modèle final
+final_xgb <- xgb_wf |> finalize_workflow(best_par) |> fit(data = data_train)
+
+
+#On prédit sur le jeu de test : en classification et en 
+xgb_class <- final_xgb |> predict(new_data=data_test,type="class")
+
+xgb_prob <- final_xgb |> predict(new_data=data_test,type="prob")
+
+test_data_fit <- test_data_fit |> bind_cols(xgb_class,xgb_prob) |> rename(xgb_class=.pred_class,xgb_prob0=.pred_0,xgb_prob1=.pred_1)
+
+#test accuracy
+test_accuracy_xgb = test_data_fit |> accuracy(truth = TypeOfShot,estimate = xgb_class)
+print(test_accuracy_xgb)
+```
+
+```{r}
+#Matrice de confusion
+
+conf_mat <- test_data_fit |>
+  conf_mat(truth = TypeOfShot, estimate = xgb_class)
+# Utiliser autoplot pour créer la heatmap
+heatmap_plot <- autoplot(conf_mat, type = "heatmap")
+heatmap_plot +
+  scale_fill_gradient(low = "white", high = "lightgreen")
+
+# Calculer la précision pour chaque classe
+matrice_confusion <- conf_mat[[1]]
+precision_par_classesxgb <- diag(matrice_confusion) / colSums(matrice_confusion)
+```
+
+## SVM linéaire
+
+Un algorithme d'apprentissage automatique qui trouve une ligne (ou un hyperplan) pour séparer les données en plusieurs classes. Il est adapté aux données linéairement séparables.
+
+```{r}
+svml_model <-
+svm_linear(cost = tune()) |>
+set_mode("classification") |>
+set_engine("kernlab")
+svml_wf <- workflow() |>
+add_recipe(data_recipe) |>
+add_model(svml_model)
+cv_splits <- vfold_cv(data_train, v = 10, repeats = 1, strata = TypeOfShot)
+par_grid <- tibble(cost=c(0.2,1,5,10,15))
+svml_cv <- svml_wf |>
+tune_grid(resamples=cv_splits,grid=par_grid,
+metrics=metric_set(accuracy))
+svml_cv |>
+autoplot()
+
+svml_cv |>
+collect_metrics()
+
+best_C <- svml_cv |>
+select_best()
+final_svml <- svml_wf |>
+finalize_workflow(best_C) |>
+fit(data = data_train)
+
+svml_class <- final_svml |>
+predict(new_data=data_test,type="class")
+svml_prob <- final_svml |>
+predict(new_data=data_test,type="prob")
+
+test_data_fit <- data_test |>
+bind_cols(svml_class,svml_prob) |>
+rename(svml_class=.pred_class,svml_prob0=.pred_0,svml_prob1=.pred_1,svml_prob2 = .pred_2,svml_prob3 = .pred_3,svml_prob4=.pred_4)
+
+test_accuracy_svml <- test_data_fit |>
+  accuracy(truth = TypeOfShot, estimate = svml_class)
+print(test_accuracy_svml)
+```
+
+```{r}
+conf_mat <- test_data_fit |> conf_mat(truth = TypeOfShot, estimate = svml_class)
+# Utiliser autoplot pour créer la heatmap
+heatmap_plot <- autoplot(conf_mat, type = "heatmap")
+heatmap_plot +
+  scale_fill_gradient(low = "white", high = "lightgreen")
+
+# Calculer la précision pour chaque classe
+matrice_confusion <- conf_mat[[1]]
+precision_par_classessvml <- diag(matrice_confusion) / colSums(matrice_confusion)
+```
+
+## SVM non-linéaire
+
+Un algorithme SVM qui utilise des transformations pour gérer des données qui ne sont pas linéairement séparables. Il peut utiliser des noyaux pour créer des frontières de décision complexes.
+
+```{r}
+svmr_model <-
+svm_rbf(cost = tune(),rbf_sigma=tune()) |>
+set_mode("classification") |>
+set_engine("kernlab")
+svmr_wf <- workflow() |>
+add_recipe(data_recipe) |>
+add_model(svmr_model)
+
+cv_splits <- vfold_cv(data_train, v = 10, repeats = 1, strata = TypeOfShot)
+par_grid <- expand.grid(cost=c(0.1,1,5,10,15,20),rbf_sigma=10^(-3:2))
+svmr_cv <- svmr_wf |>
+tune_grid(resamples=cv_splits,grid=par_grid,
+metrics=metric_set(accuracy))
+svmr_cv|> autoplot()
+
+svmr_cv |>
+collect_metrics()
+
+best_par<- svmr_cv |>
+select_best()
+
+
+final_svmr <- svmr_wf |>
+finalize_workflow(best_par) |>
+fit(data = data_train)
+
+svmr_class <- final_svmr |>
+predict(new_data=data_test,type="class")
+
+svmr_prob <- final_svmr |>
+predict(new_data=data_test,type="prob")
+
+test_data_fit <- data_test |>
+bind_cols(svmr_class,svmr_prob) |>
+rename(svmr_class=.pred_class,svmr_prob0=.pred_0,svmr_prob1=.pred_1,svmr_prob2 = .pred_2,svmr_prob3 = .pred_3,svmr_prob4=.pred_4)
+
+test_accuracy_svmr <- test_data_fit |>
+  accuracy(truth = TypeOfShot, estimate = svmr_class)
+
+print(test_accuracy_svmr)
+```
+
+```{r}
+conf_mat <- test_data_fit %>%
+  conf_mat(truth = TypeOfShot, estimate = svmr_class)
+
+# Utiliser autoplot pour créer la heatmap
+heatmap_plot <- autoplot(conf_mat, type = "heatmap")
+heatmap_plot +
+  scale_fill_gradient(low = "white", high = "lightgreen")
+
+# Calculer la précision pour chaque classe
+matrice_confusion <- conf_mat[[1]]
+precision_par_classessvmr <- diag(matrice_confusion) / colSums(matrice_confusion)
+```
+
+# Bilan
+
+## Précision des modèles
+
+```{r}
+# Sélectionner la dernière colonne de chaque data frame
+dernieres_colonnes <- lapply(list(test_accuracy_log, test_accuracy_lasso, test_accuracy_ridge,test_accuracy_net,test_accuracy_rf,test_accuracy_xgb,test_accuracy_svml,test_accuracy_svmr), function(df) df[, ncol(df)])
+
+accuracy <- sapply(dernieres_colonnes, function(x) {
+  if(is.numeric(x)) {
+    return(x)
+  } else {
+    return(x$.estimate)
+  }
+})
+
+# Donner des noms aux colonnes avec les noms des modèles
+noms_modeles <- c("Régression logistique multinomiale", "Régression logistique multinomiale Lasso", "Régression logistique multinomiale Ridge", "Régression logistique Elastic-Net", "Random Forest","XGboost","SVM linéaire","SVM non-linéaire")
+donnees <- data.frame(Modele = noms_modeles, Precision = accuracy)
+
+meilleur_modele <- donnees |> 
+  filter(Precision == max(Precision))
+
+p <- ggplot(donnees, aes(x = Modele, y = Precision, fill = Modele)) +
+  geom_bar(stat = "identity") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  labs(title = "Comparaison de la Précision des Modèles",
+       x = "Modèle",
+       y = "Précision")
+# Ajouter une annotation pour le meilleur modèle
+p <- p + geom_text(data = meilleur_modele, aes(label = "Best", y = Precision + 0.01),
+              color = "red", position = position_dodge(width = 0.9), size = 5, vjust = -0.5)
+
+print(p)
+```
+
+Il est important de noter que les modèles présentés n'ont été exécutés qu'une seule fois en raison de contraintes de temps, ce qui signifie que les résultats obtenus pourraient varier considérablement en cas de répétitions supplémentaires ou de modifications des paramètres de test.
+
+-   **Random Forest** et **XGboost** semblent avoir les performances les plus élevées en termes de précision globale parmi les modèles évalués. Cela peut indiquer que ces modèles sont mieux adaptés à nos données.
+
+-   Les modèles de **Régression logistique multinomiale (Lasso, Ridge et Elastic-Net)** présentent des niveaux de précision similaires et sont légèrement moins performants que les méthodes comme Random Forest et XGboost. Cela peut suggérer que bien que ces modèles soient compétents, ils peuvent ne pas être aussi robustes que les méthodes d'ensemble dans ce cas particulier.
+
+-   Enfin, les modèles **SVM linéaire** et **SVM non-linéaire** ont des précisions comparables aux régressions logistiques.
+
+## Précision par classe des modèles
+
+```{r}
+# Créer un dataframe à partir de ces vecteurs
+precision_df <- data.frame(
+  Classe = rep(0:4, times = 8), # Répéter les numéros de classe pour chaque modèle
+  Precision = c(precision_par_classeslog, precision_par_classeslasso,precision_par_classesridge,precision_par_classesnet,precision_par_classesrf,precision_par_classesxgb,precision_par_classessvml,precision_par_classessvmr),
+  Modele = rep(c("Régression logistique multinomiale", "Régression logistique multinomiale Lasso", "Régression logistique multinomiale Ridge", "Régression logistique Elastic-Net", "Random Forest","XGboost","SVM linéaire","SVM non-linéaire"), each = 5) # Répéter le nom du modèle pour chaque classe
+)
+
+# Créer un graphique à barres
+ggplot(precision_df, aes(x = as.factor(Classe), y = Precision, fill = Modele)) +
+  geom_bar(stat = "identity", position = position_dodge()) +
+  scale_fill_brewer(palette = "Dark2") +
+  theme_minimal() +
+  labs(title = "Précision par Classe pour Différents Modèles",
+       x = "Classe",
+       y = "Précision") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+-   **Classe 0 :** Pour une majorité de cas, les modèle ont réussi à identifier correctement les instances de la Classe 0.
+
+-   **Classe 1** : Les modèles distinguent très bien les instances de la Classe 1 des autres classes.
+
+-   **Classe 2** : Les modèles sont également assez compétents pour prédire correctement les instances de la Classe 2.
+
+-   **Classe 3** : La précision est très faible, ce qui signifie que le modèle a identifié correctement très peu d'instances de la Classe 3.
+
+-   **Classe 4** : La précision est très faible, ce qui signifie que le modèle a identifié correctement très peu d'instances de la Classe 4.
+
+-   Cela est du au très faible nombre d'occurences pour les labels 3 et 4. La prochaine étape pourrait être d'inclure une technique de rééquilibrage des classes.
+
+```{r}
+count_classes <- table(test_data_fit$TypeOfShot)
+print(count_classes)
+```
