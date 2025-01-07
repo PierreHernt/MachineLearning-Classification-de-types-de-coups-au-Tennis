@@ -3,6 +3,7 @@
 *.qmd linguist-language=R
 *.R linguist-detectable
 *.html linguist-ignore
+*.js linguist-ignore
 
 # Ignorer les fichiers binaires ou statiques
 *.png linguist-ignore
