@@ -1,4 +1,6 @@
 # Forcer la détection du langage principal
+# Considérer les fichiers .qmd comme du R
+*.qmd linguist-language=R
 *.R linguist-detectable
 *.html linguist-ignore
 
