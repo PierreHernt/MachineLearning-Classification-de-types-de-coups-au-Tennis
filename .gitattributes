@@ -1,0 +1,18 @@
+# Forcer la détection du langage principal
+*.R linguist-detectable
+*.py linguist-ignore
+*.html linguist-ignore
+*.css linguist-ignore
+*.js linguist-ignore
+
+# Ignorer les fichiers binaires ou statiques
+*.png linguist-ignore
+*.jpg linguist-ignore
+*.jpeg linguist-ignore
+*.gif linguist-ignore
+*.pdf linguist-ignore
+*.csv linguist-ignore
+*.xlsx linguist-ignore
+
+# Traiter les fichiers spécifiques comme détectables
+data/*.csv linguist-detectable
