@@ -4,7 +4,7 @@ Ce projet vise à classifier différents types de coups de tennis à partir de m
 
 ## Description du Jeu de Données
 
-Les données sont issues de mesures d'accélération et de gyroscope pour différents types de coups de tennis. Chaque coup est représenté par 100 frames de données brutes. Pour les rendre exploitables par les algorithmes de Machine Learning, ces données ont été agrégées en caractéristiques globales calculées pour chaque coup.
+Les données (training_dataset_normalise.csv) sont issues de mesures d'accélération et de gyroscope pour différents types de coups de tennis. Chaque coup est représenté par 100 frames de données brutes. Pour les rendre exploitables par les algorithmes de Machine Learning, ces données ont été agrégées en caractéristiques globales calculées pour chaque coup.
 
 ### Caractéristiques Calculées
 
