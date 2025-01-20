@@ -1,7 +1,7 @@
 # Classification des Coups de Tennis avec Machine Learning
 
 Ce projet vise à classifier différents types de coups de tennis à partir de mesures d'accélération et de gyroscope enregistrées avec un accéléromètre positionné sur le manche d'une raquette.
-Pour visualiser le rendu, il faut télécharger le dossier complet et lancer le document quarto **'Resultat_commun.qmd'** ou le rendu htlm **'Resultat.html'**.
+Pour visualiser le rendu, il faut télécharger le dossier complet, l'extraire et lancer le document htlm **'Resultat.html'**.
 
 ## Description du Jeu de Données
 
